@@ -1,0 +1,96 @@
+PUT _watcher/watch/chatgpt_analysis
+{
+    "trigger": {
+      "schedule": {
+        "interval": "5m"
+      }
+    },
+    "input": {
+      "chain": {
+          "inputs": [
+              {
+                  "first": {
+                      "search": {
+                          "request": {
+                              "search_type": "query_then_fetch",
+                              "indices": [
+                                "logs-kubernetes*"
+                              ],
+                              "rest_total_hits_as_int": true,
+                              "body": {
+                                "query": {
+                                  "bool": {
+                                    "must": [
+                                      {
+                                        "match": {
+                                          "kubernetes.container.name": "konnectivity-agent"
+                                        }
+                                      },
+                                      {
+                                        "match" : {
+                                          "message":"error"
+                                        }
+                                      }
+                                    ]
+                                  }
+                                },
+                                "size": "1"
+                              }
+                            }
+                        }
+                    }
+                },
+                {
+                    "second": {   
+                        "transform": {
+                            "script": "return ['first_hit': ctx.payload.first.hits.hits.0._source.message.replace('\"', \"\")]"
+                        }
+                    }
+                },
+                {
+                    "third": {
+                        "http": {
+                            "request": {
+                                "method" : "POST",
+                                "url": "https://XXX.azure.com/openai/deployments/pme-gpt-35-turbo/chat/completions?api-version=2023-03-15-preview",
+                                "headers": {
+                                    "api-key" : "XXX",
+                                    "content-type" : "application/json"
+                                },
+                                "body" : "{ \"messages\": [ { \"role\": \"system\", \"content\": \"You are a helpful assistant.\"}, { \"role\": \"user\", \"content\": \"What are the potential reasons for the following kubernetes error: {{ctx.payload.second.first_hit}}\"}], \"temperature\": 0.5, \"max_tokens\": 2048}" ,
+                                "connection_timeout": "60s",
+                                "read_timeout": "60s"
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    },
+    "condition": {
+      "compare": {
+        "ctx.payload.first.hits.total": {
+          "gt": 0
+        }
+      }
+    },
+    "actions": {
+        "index_payload" : {
+            "transform": {
+                "script": {
+                    "source": """
+                        def payload = [:];
+                        payload.timestamp = new Date();
+                        payload.pod_name = ctx.payload.first.hits.hits[0]._source.kubernetes.pod.name;
+                        payload.error_message = ctx.payload.second.first_hit;
+                        payload.chatgpt_analysis = ctx.payload.third.choices[0].message.content;
+                        return payload;
+                    """
+                }
+            },
+            "index" : {
+                "index" : "chatgpt_k8s_analyzed"
+            }
+        }
+    }
+}
